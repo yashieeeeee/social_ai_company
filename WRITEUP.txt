@@ -264,6 +264,6 @@ Candidate: [Your Full Name] - [College / Current Org]
        same gate function.
     6. Local-embedding theme clustering over comments (still fully offline).
 
-  Total verification state: 25 unit tests green (mocked LLM, no model needed),
+  Total verification state: 27 unit tests green (mocked LLM, no model needed),
   end-to-end run green in both --no-llm and real-model paths, hosted-API scan
   over all .py files returns NONE, full agent trace ships in logs/trace.jsonl.

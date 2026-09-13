@@ -58,7 +58,7 @@ python run.py --brief-file demo_brief.txt --auto-approve
 python run.py --brief "We are launching a budget espresso machine for students. Two-week awareness, playful, don't over-promise."
 
 # D) Tests (mocked LLM, no model needed) + offline no-LLM proof:
-python -m unittest discover -s tests          # 25 tests, must print OK
+python -m unittest discover -s tests          # 27 tests, must print OK
 ```
 
 Expected output of (A): `[publish] 12 posts live`, `[week1] imp=~32k`,
