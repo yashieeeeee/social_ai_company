@@ -77,6 +77,32 @@ class TestRobustness(unittest.TestCase):
                           "hashtags": ["a"]})
             self.assertIn(v["verdict"], ("approve", "reject"))
 
+    def test_streak_detector_fires_on_synthetic_streak(self):
+        from prodigal_social.agents import AnalyticsAgent
+        bus = MessageBus(db_path=":memory:", trace_path="logs/t3.jsonl")
+        a = AnalyticsAgent(dead_llm(), bus, MockPlatform(db_path=":memory:"))
+        rows = [{"post_id": f"s{i}", "channel": "buzz", "day": i + 1, "slot": "19:00",
+                 "copy": "short post here?", "hashtags": "a", "format": "meme",
+                 "cta": "none", "impressions": 3000 - i * 700, "likes": 200,
+                 "n_comments": 20, "shares": 30, "saves": 10, "clicks": 50,
+                 "follower_delta": 2} for i in range(4)]
+        stats = a._stats(rows, "cX")
+        self.assertIn("novelty_watch", stats["notes"])
+        self.assertEqual(stats["streaks"]["buzz"], 4)
+
+    def test_streak_absent_honestly_reported(self):
+        from prodigal_social.agents import AnalyticsAgent
+        bus = MessageBus(db_path=":memory:", trace_path="logs/t3.jsonl")
+        a = AnalyticsAgent(dead_llm(), bus, MockPlatform(db_path=":memory:"))
+        rows = [{"post_id": f"r{i}", "channel": "buzz", "day": i + 1, "slot": "19:00",
+                 "copy": "short post here", "hashtags": "a",
+                 "format": ["meme", "howto", "story"][i % 3],
+                 "cta": "none", "impressions": 2000, "likes": 100,
+                 "n_comments": 10, "shares": 10, "saves": 5, "clicks": 20,
+                 "follower_delta": 1} for i in range(3)]
+        stats = a._stats(rows, "cX")
+        self.assertIn("novelty_absent", stats["notes"])
+
 
 if __name__ == "__main__":
     unittest.main()

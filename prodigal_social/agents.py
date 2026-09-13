@@ -446,8 +446,40 @@ class AnalyticsAgent(BaseAgent):
                 f"{avg(cta_c['other']):.1f} (n={len(cta_c['question'])}/{len(cta_c['other'])})")
         if neg > pos:
             notes["sentiment_negative"] = f"{neg} negative vs {pos} positive comments ({sens} sensitive)"
+
+        # streak detector (R5): longest same-format run per channel
+        streak_info = {}
+        for ch in {r["channel"] for r in rows}:
+            seq = sorted([r for r in rows if r["channel"] == ch], key=lambda r: r["day"])
+            best, cur = 1, 1
+            for a, b in zip(seq, seq[1:]):
+                cur = cur + 1 if b["format"] == a["format"] else 1
+                best = max(best, cur)
+            streak_info[ch] = best
+        maxrun = max(streak_info.values()) if streak_info else 0
+        if maxrun >= 3:
+            notes["novelty_watch"] = f"max same-format run {maxrun} days: check late-run posts for decay"
+        else:
+            notes["novelty_absent"] = (
+                f"max same-format run {maxrun} (<3) per channel {streak_info}: "
+                "decay rule untestable this week by design (calendar rotates formats)")
+
+        # counterfactuals: what Compliance censored out of the metrics table.
+        # Analytics never sees hidden formulas, only these bus snapshots.
+        censored: List[Dict[str, Any]] = [
+            m["payload"] for m in self.bus.all() if m["mtype"] == "post_dropped"]
+        if censored:
+            why: Dict[str, int] = {}
+            for c in censored:
+                for reason in str(c.get("reasons", "")).split(";"):
+                    reason = reason.strip()
+                    if reason:
+                        why[reason] = why.get(reason, 0) + 1
+            notes["compliance_censoring"] = (
+                f"{len(censored)} drafts never published ({why}); "
+                "hashtag/length/overclaim penalties unobservable in published metrics")
         return {"kpis": kpis, "top": top, "bottom": bottom, "notes": notes,
-                "patterns": patterns,
+                "patterns": patterns, "streaks": streak_info,
                 "sentiment": {"positive": pos, "negative": neg, "sensitive": sens, "themes": themes},
                 "recommendations": recs}
 

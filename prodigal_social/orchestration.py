@@ -94,9 +94,15 @@ class CampaignRunner:
             self.bus.send("orchestrator", "human_queue", "post_errored",
                           {"slot": [channel, day, slot], "error": str(e)[:160]})
             return None
-        # cap hit -> human queue, NEVER loop again
+        # cap hit -> human queue, NEVER loop again. Snapshot the censored draft
+        # so Analytics can count what Compliance kept out of the metrics.
         self.bus.send("orchestrator", "human_queue", "post_dropped",
-                      {"post_id": post["post_id"], "reasons": feedback})
+                      {"post_id": post["post_id"], "reasons": feedback,
+                       "censored": {"channel": post["channel"], "slot": post["slot"],
+                                    "format": post["format"], "cta": post["cta"],
+                                    "word_count": post["word_count"],
+                                    "n_tags": len(post["hashtags"]),
+                                    "ends_with_question": post["ends_with_question"]}})
         return None
 
     def build_week(self, cid: str, strategy: Dict, week: int,
