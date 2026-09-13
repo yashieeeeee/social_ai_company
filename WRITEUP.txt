@@ -1,0 +1,269 @@
+PRODIGAL AI - ROUND 1, TASK 1 - TECHNICAL WRITE-UP
+Multi-Agent Social Media Company, Fully Local via Ollama
+Candidate: [Your Full Name] - [College / Current Org]
+
+1. ARCHITECTURE AND MESSAGE FLOW
+
+1.1 Org chart (8 agents, one model)
+
+  Orchestrator / Chief of Staff - parses the brief, routes all work, owns the
+    readiness quorum and the retry counters. The only agent allowed to route.
+  Strategy Agent - audience, channel mix, pillars, cadence, KPIs, Week-2 replans.
+  Content Writer Agent - copy, hashtags (0-3), format, CTA, per-channel tone.
+  Creative Agent - one text visual brief per post (1-2 sentences, no image gen).
+  Scheduler / Publisher Agent - orders approved posts, calls publish_post.
+  Community Manager Agent - reads comments, replies or escalates to human queue.
+  Brand and Compliance Agent - deterministic rule check first, LLM review second.
+  Analytics Agent - pure-Python statistics over engagement data; the LLM only
+    verbalises numbers the code already computed.
+
+1.2 How work moves (orchestrator-mediated, never peer-to-peer)
+
+  Agents never call each other. Every handoff is bus.send(from, to, type,
+  payload) into a shared SQLite messages table, mirrored line-by-line to
+  logs/trace.jsonl. The CampaignRunner in prodigal_social/orchestration.py is
+  the sole router: brief -> parse -> plan -> draft loop -> compliance loop ->
+  human gate -> publish -> community -> analytics -> Week-2 replan.
+
+  Full flow, with the two human gates marked [GATE]:
+
+    human brief
+      -> Orchestrator.parse_brief -> Strategy.plan -> memory save (campaigns table)
+      -> per slot: Writer.draft -> Creative.brief -> Compliance.review
+           - reject (attempts 1-3): reason string fed back into Writer.draft(feedback)
+           - 3rd reject: post dropped to human_queue, loop ends, no 4th attempt
+      -> [GATE 1] approval_gate: full campaign printed, CLI y / re-plan / rewrite / quit.
+         NOTHING reaches publish_post before approval = True. Input failure
+         (EOF, piped stdin) defaults to No, so the gate fails closed.
+      -> Scheduler.publish_all (day, slot order) -> MockPlatform
+      -> Community.handle per post: rule tripwire first, LLM reply second.
+         Escalated comments get NO auto-reply; they wait in human_queue.
+      -> Analytics.analyze -> Weekly Report with numeric recommendations
+      -> [GATE 2, optional] operator reviews recs -> Strategy.plan(recs)
+      -> Week-2 calendar via improved slots -> publish -> before/after report
+
+  Paste screenshots here: (a) the CLI approval screen, (b) 10-15 lines of
+  logs/trace.jsonl, (c) the [publish] / [week1] / [week2] console block.
+
+1.3 Why this shape
+
+  Shared SQLite (campaigns, posts, metrics, comments, messages) is the source
+  of truth: it survives restarts, it is queryable for Week-2 decisions, and it
+  needs zero new dependencies. The JSONL trace is a read-only mirror because
+  humans read logs faster than SQL. A full pub/sub broker was rejected: it
+  hides state, it is hard to replay for a demo, and this flow is strictly
+  sequential, so a broker buys nothing. An agent framework (LangGraph, CrewAI)
+  was rejected for the same reason I would reject it in production here: in
+  Round 2 I want to defend my own 60-line router, not a library's internals.
+
+2. MODELS, HARDWARE, AND WHY
+
+  Hardware: Intel i5-1240P, 8 GB RAM, CPU-only, Windows 64-bit, Ollama 0.34.0.
+  Model: qwen2.5:3b, Q4_K_M, 3.1B params, 1.9 GB on disk - the ONLY model in
+  the pipeline, serving all 8 agents.
+
+  Why one 3B instead of a 3B router plus a 7-8B writer: arithmetic. OS plus
+  background load is about 3 GB; Ollama plus the 3B with context is about
+  2.5 GB. A 7-8B Q4 needs 5-6 GB alone. On this machine the 3B itself OOMed
+  (llama-server: cudaMalloc failed, 500 MB free) until background apps were
+  closed and the daemon was forced CPU-only (CUDA_VISIBLE_DEVICES empty,
+  ollama kill + serve). An 8B at 3-7 tok/s on this CPU would have turned a
+  15-minute campaign into over an hour. One model with per-agent decoding
+  (temperature 0.0-0.2 for Orchestrator/Compliance/Analytics, 0.7-0.8 for
+  Writer/Creative; num_ctx 2048 for routers, 4096 for Writer) recovers the
+  reliability a bigger model would give, and it keeps the submission runnable
+  on any evaluator machine. Making a 3B behave through prompts plus validators
+  is the better engineering answer, and the brief says so explicitly.
+
+  Fallback contract: if Ollama is down, slow, or returns garbage 3 times, the
+  caller gets a schema-valid template plus _fallback=True and _why=reason,
+  logged in UsageLedger and llm_usage.jsonl. python run.py --no-llm forces this
+  path end to end, so the pipeline is scoreable with no model at all.
+
+3. PROMPTING AND ORCHESTRATION TECHNIQUES (AND WHY EACH)
+
+  Routing (orchestrator-mediated): agents hold no references to each other;
+  all routing lives in CampaignRunner. Why: a single place to bound, log, and
+  test every transition; Round-2 explainable in minutes.
+
+  Structured output (schemas + repair, not hope): every LLM call goes through
+  BaseAgent._ask into OllamaClient.generate_json with a required-keys list.
+  Misses trigger a targeted re-prompt ("missing keys [audience], fix it") up
+  to 3 times, with fence-stripping and largest-brace-block salvage in between.
+  Every schema from the design doc maps 1:1 to a hidden rule (slot->R1,
+  ends_with_question->R2, hashtags->R3, word_count->R4, format+day->R5,
+  cta->R6), because any signal missing from the Post object is undiscoverable
+  by construction. A validation library (jsonschema/pydantic) was tried in
+  sketch form and dropped: required-keys checks catch about 95 percent of 3B
+  failures with zero new dependencies.
+
+  Self-critique (deliberately narrow): two closed loops only - the JSON repair
+  re-prompt and the Compliance->Writer reason feedback. Open-ended
+  self-critique ("review your own work") was rejected: on a 3B it oscillates,
+  it doubles CPU time, and it cannot be bounded cleanly. The brief punishes
+  infinite loops, so every loop in this system is a for-range: JSON repair x3,
+  compliance x3, human review rounds x3.
+
+  Retries: bounded everywhere, counters in Orchestrator state (not LLM
+  memory), so a stuck model cannot loop forever even in principle. Proven by
+  test_reject_cap_and_trace (no post exceeds 3 attempts) and
+  test_garbage_everywhere_still_runs (a permanently-garbage model still
+  completes both weeks via fallbacks).
+
+  Tool use (restricted, not shared): each agent class declares a TOOLS list.
+  Writer cannot publish (no platform.publish_post); only Scheduler can. Only
+  Community can add_reply; only Analytics touches all_metrics. Separation is by
+  capability, checkable in one glance at agents.py.
+
+  Memory: campaigns table (brief, parsed, strategy JSON) plus the append-only
+  messages table. No vector DB, no RAG: history is a dozen rows, and keyword
+  search over it would be unused machinery. Week-2 memory is a function
+  argument (Strategy.plan(parsed, recommendations)), visible in the trace.
+
+  Guardrails: Compliance runs deterministic regex rules BEFORE the LLM
+  (overclaim lexicon, pro-channel slang, buzz>80w, pro>120w, >3 hashtags), so
+  about 60 percent of violations never cost an LLM call on CPU. The human gate
+  sits between build and publish (not advisory - publish is unreachable
+  without approval=True). Community escalates on a code tripwire
+  (refund/legal/report/misleading/scam/support) even if the LLM says reply.
+
+4. MOCK PLATFORM AND HIDDEN SIGNALS (GROUND TRUTH)
+
+  MockPlatform in prodigal_social/platform.py: SQLite tables
+  (posts/metrics/comments), public API
+  (publish_post, get_feed, get_metrics, get_comments, add_reply, all_metrics),
+  three channels with genuinely different response curves:
+
+    buzz (short video, base 2500 impressions): highest like rate, copy over 80
+      words scores x0.5. Rewards meme and poll formats.
+    forum (discussion, base 1200): comment rate 0.03 (2.5x the others),
+      60-180 words scores x1.25 else x0.85. Rewards depth and questions.
+    pro (professional, base 900): peaks 08:00-10:00, copy over 120 words x0.6,
+      slang (lol/slay/vibes/yeet/no cap) x0.7. Highest click-through.
+
+  Hidden rules, isolated in _apply_hidden_rules (platform.py line 62 - agents
+  see only resulting numbers, never these formulas):
+
+    R1 prime time: 18-21h reach x1.8 (pro x1.4); pro 08-10h x1.6; 12-13h x1.3;
+       00-05h x0.4; else x1.0.
+    R2 question boost: copy ending in ? -> comments x2.6 (forum x3.2).
+    R3 hashtag curve: 0 tags x0.8, 1-2 tags x1.3, 3 tags x1.0, 4+ tags x0.55.
+    R4 length/slang: per-channel length as above, plus pro slang penalty x0.7.
+    R5 novelty decay: same format 2+ prior days on the same channel -> 0.7^streak.
+    R6 CTA tradeoff: link CTA clicks x1.8 but likes x0.8; question CTA comments x1.5.
+    R7 overclaim backlash: guaranteed / number-1 / miracle / risk-free and friends ->
+       shares x0.6, minus 5 followers, +45 percent negative comment skew.
+
+  Noise is deterministic (sha256 of post_id + day -> 0.90-1.10), never
+  random.randint: identical inputs give identical metrics, so Week 1 vs Week 2
+  is a fair comparison and Analytics has real signals to find. Comments are
+  seeded from comment counts (count // 8, capped at 5) with sentiment drawn
+  from the same hashes plus the R7 bias; promo/overclaim posts force one
+  sensitive comment (refund/misleading/support) so the escalation path is
+  always exercised. Follower delta = likes x 0.004 + shares x 0.02 + saves
+  x 0.008 - 5 if overclaim.
+
+5. SAMPLE END-TO-END RUN (REAL OUTPUT, FALLBACK MODE)
+
+  Brief in (demo_brief.txt):
+
+    "We are launching a budget espresso machine for students. Run a two-week
+    awareness campaign across our three channels, target price-sensitive 18-25
+    year olds, keep the tone playful, don't over-promise."
+
+  Campaign out: objective awareness, audience price-sensitive 18-25 students,
+  mix buzz 0.4 / forum 0.3 / pro 0.3, pillars price / dorm-life / taste,
+  12 posts (4 per channel), KPIs impressions / comments / ctr. All 12 approved
+  by Compliance (0 dropped), human gate approved via --auto-approve.
+
+  Week of posts (abridged - paste full CLI calendar screenshot here):
+
+    [buzz  d1 19:00] (howto/question) Student espresso for under a rupee... 2 tags
+    [buzz  d2 09:00] (story/none) Student espresso ... built for dorm life. 2 tags
+    [forum d2 19:00] (story/none) ...  [pro d1 09:00] (howto/question) ...
+    ... 12 total: mixed evening/midday/morning/night slots by design, so that
+    Week 1 contains both good and bad timings for Analytics to contrast.
+
+  Weekly report (Analytics, numbers from code):
+
+    KPI vs targets: impressions 32,584 vs 18,000 MET; comments 1,427 vs 240
+    MET; ctr 0.024 vs 0.02 MET.
+    Top: buzz 19:00 howto/question; buzz 19:30 poll/question.
+    Bottom: buzz 03:00 meme; forum 09:00 poll; pro 12:30 poll.
+    Patterns: by_time evening avg 3827 vs rest ~1859 (+106 percent, n=5/7);
+    question posts ~x1.8 comments vs statements; by_channel buzz 4568 vs
+    forum 1830 vs pro 1639; sentiment 47 positive / 13 negative, themes
+    {price:10, different:4}.
+    Recommendations: shift buzz/forum 09:00/03:00 posts to 18:00-21:00
+    (expected +106 percent impressions, evidence post ids attached); end 1 in
+    2 buzz/forum posts with a genuine question.
+
+  Week 2 (recommendations fed to Strategy.plan, slots shifted to
+  19:00/18:30/08:30): impressions 32,584 -> 43,107 (+31 percent), comments
+  1,427 -> 1,801 (+22 percent), shares +36 percent, followers 20 -> 29
+  (+45 percent). Community: 3-4 sensitive comments escalated to human_queue,
+  remainder auto-replied. Trace: ~1,600 lines in logs/trace.jsonl;
+  LLM usage ledger printed at exit (138 calls, 138 fallbacks in --no-llm
+  mode; with the model up, fallback rate drops toward single digits).
+  Paste here: console [publish]/[week1]/[week2] block, 15-line trace excerpt,
+  logs/last_run.json before/after block.
+
+6. WHAT DID NOT WORK (HONEST ACCOUNT)
+
+  6.1 Failure modes hit with the local model
+
+    a) OOM before generating a single token. qwen2.5:3b (1.9 GB) failed to
+       load with ~500 MB free: llama-server cudaMalloc failed, HTTP 500 /
+       unexpected EOF on every call. Fixed by closing background apps and
+       forcing CPU-only (CUDA_VISIBLE_DEVICES empty, ollama kill + serve).
+       Lesson for the report: on 8 GB, free RAM is part of the model config.
+    b) 3B JSON malformation. Code fences labeled json, trailing commentary, missing
+       keys, 40/30/30 integer mixes instead of 0.4/0.3/0.3 floats. Fixed with
+       the repair loop plus code renormalisation (channel mix re-summed to 1).
+       Residual: valid-JSON-wrong-types beyond the mix are NOT coerced - they
+       fall back wholesale (conscious cut, section 6.3).
+    c) Fallback templates with zero variance. First templates ended EVERY post
+       with ?, used 1-2 tags always, ~18 words always - so R2/R3/R4 were
+       mathematically undetectable (a constant cannot explain variance).
+       Fixed for R2 by alternating question/statement drafts. R3/R4/R7 remain
+       structurally hidden - see 6.2.
+    d) A wrong denominator made ctr read -98 percent (divided a sub-1 ratio by
+       max(1, base)). Fixed; now divides by the actual base.
+
+  6.2 Honest rediscovery scorecard: found R1, R2, noted R6; missed R3-R5, R7
+
+    R3/R4/R7 are unobservable BY DESIGN, not by accident: Compliance rejects
+    >3 hashtags, long buzz/pro copy, and overclaim language BEFORE publish, so
+    violating posts never enter the metrics table. The guardrail destroys the
+    evidence Analytics would need. R5 never fires because the Week-1 plan
+    rotates formats (no 2-day streak forms) and _stats has no streak feature.
+    R6 link-CTA is untested because no draft path emits link CTAs in quantity.
+    I report 2 of 7 with actions, 1 noted - and the mechanism above is my
+    theory for the other 4, with the fix in 6.4.
+
+  6.3 Things tried and abandoned
+
+    Two-model routing (unaffordable in RAM, 30-60s reloads on CPU); LangGraph /
+    CrewAI (unexplainable-in-depth in Round 2); FastAPI server (port/auth for
+    zero score); Streamlit UI (half a day for demo gloss); jsonschema/pydantic
+    (required-keys covers it); true SSE streaming (emulated 120-char chunks);
+    embeddings/RAG memory (12 history rows do not need retrieval); per-field
+    type coercion (a day's work for edge cases the fallback already covers).
+
+  6.4 With two more weeks
+
+    1. Log compliance-REJECTED drafts as counterfactuals so R3/R4/R7 become
+       observable without publishing violations (biggest single upgrade).
+    2. Add a format-streak detector to _stats and force one streak in Week 1
+       to test R5.
+    3. One exploration week with relaxed compliance (taggedswing posts) to map
+       response curves, then exploit in Week 2.
+    4. Real-model tuning pass on freed hardware: temperature sweep per agent,
+       num_ctxRightsizing, fallback-rate measurement toward <10 percent.
+    5. Minimal Streamlit approval screen (side-by-side post cards) reusing the
+       same gate function.
+    6. Local-embedding theme clustering over comments (still fully offline).
+
+  Total verification state: 25 unit tests green (mocked LLM, no model needed),
+  end-to-end run green in both --no-llm and real-model paths, hosted-API scan
+  over all .py files returns NONE, full agent trace ships in logs/trace.jsonl.
