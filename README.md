@@ -18,8 +18,8 @@ Week 2 with applied recommendations and before/after numbers.
 | Model | `qwen2.5:3b` (Q4_K_M, single model for all 8 agents) |
 
 ```powershell
-git clone <your-repo-url> prodigal-social
-cd prodigal-social
+git clone <your-repo-url> "prodigal social"
+cd "prodigal social"
 pip install -r requirements.txt        # requests only — nothing else
 
 ollama pull qwen2.5:3b                # 1.9 GB, one-time download
