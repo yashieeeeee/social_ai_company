@@ -17,7 +17,7 @@ from prodigal_social.bus import MessageBus
 from prodigal_social.llm import OllamaClient
 from prodigal_social.orchestration import CampaignRunner, format_trace
 from prodigal_social.platform import MockPlatform
-
+Path("logs").mkdir(parents=True, exist_ok=True)
 logging.basicConfig(level=logging.WARNING,
                     format="%(asctime)s %(name)s %(levelname)s: %(message)s",
                     handlers=[logging.FileHandler("logs/prodigal.log", encoding="utf-8"),
