@@ -1,6 +1,6 @@
 PRODIGAL AI - ROUND 1, TASK 1 - TECHNICAL WRITE-UP
 Multi-Agent Social Media Company, Fully Local via Ollama
-Candidate: [Your Full Name] - [College / Current Org]
+Candidate: Yashi Gupta[Prodigal AI Intern]
 
 1. ARCHITECTURE AND MESSAGE FLOW
 
