@@ -1,38 +1,31 @@
 # Prodigal Social — Multi-Agent Social Media Company (fully local)
 
-8 agents run a social agency on your machine. Human brief in → campaign plan →
-copy + creative → compliance review → **your approval** → publish to a mock
-platform → simulated engagement → community replies → weekly analytics report →
-Week 2 with applied recommendations and before/after numbers.
+8 agents run a social agency on your machine: brief in → campaign plan →
+copy + creative → compliance review → your approval → publish to a mock
+platform → simulated engagement → community replies → weekly report → Week 2
+with before/after numbers.
 
-**No hosted LLM APIs anywhere.** The only network call in the codebase is
-`POST http://localhost:11434/api/generate`. Verify: `grep -r "openai\|anthropic\|api.groq\|generativelanguage" --include=*.py .` returns nothing.
+No hosted LLM APIs anywhere. The only network call in the codebase is
+`POST http://localhost:11434/api/generate`.
 
-## 1. Setup (5 min)
+## Setup
 
-| Requirement | Value |
-|---|---|
-| Python | 3.10+ (tested on 3.14.1, Windows 64-bit) |
-| RAM | 8 GB minimum (model is 1.9 GB) |
-| Ollama | 0.34+ — https://ollama.com/download |
-| Model | `qwen2.5:3b` (Q4_K_M, single model for all 8 agents) |
+Python 3.10+, 8 GB RAM, Ollama 0.34+ (https://ollama.com/download),
+model `qwen2.5:3b` (Q4_K_M, 1.9 GB, one model for all 8 agents).
 
 ```powershell
-git clone <your-repo-url> "prodigal social"
+git clone https://github.com/yashieeeeee/social_ai_company.git "prodigal social"
 cd "prodigal social"
-pip install -r requirements.txt        # requests only — nothing else
-
-ollama pull qwen2.5:3b                # 1.9 GB, one-time download
-ollama serve                          # start daemon (skip if already running)
-curl.exe http://localhost:11434/api/tags   # must list qwen2.5:3b
+pip install -r requirements.txt        # requests only
+ollama pull qwen2.5:3b
+ollama serve                           # skip if already running
 ```
 
-**SQLite needs no setup.** `data/prodigal.db` (campaigns, posts, metrics,
-comments, messages) is created automatically on first run. Delete it any time
-for a clean slate — all runs are reproducible from `demo_brief.txt`.
+SQLite needs no setup — `data/prodigal.db` is created on first run.
+Delete it any time for a clean slate.
 
-**If the model OOMs** (we hit `cudaMalloc failed` with only ~500 MB free on an
-8 GB machine): close heavy apps, then force CPU-only before retrying:
+If the model OOMs (`cudaMalloc failed`, common with <1 GB free on 8 GB machines):
+close heavy apps, then force CPU-only and retry:
 
 ```powershell
 $env:CUDA_VISIBLE_DEVICES=""
@@ -40,127 +33,64 @@ ollama kill; ollama serve
 ollama run qwen2.5:3b "say hi in 5 words"   # must answer before continuing
 ```
 
-No Ollama at all? Every command below accepts `--no-llm`: deterministic
-template fallbacks produce a full valid run so evaluators can score the
-pipeline without a model.
+No Ollama? Append `--no-llm` to any command below: deterministic fallbacks
+produce a full valid run so the pipeline is scoreable without a model.
 
-## 2. Demo end to end (exact commands)
+## Run
 
 ```powershell
-# A) Full demo, non-interactive (use for the video): brief -> gate(auto) ->
-#    publish 12 posts -> community -> Week-1 report -> Week-2 (+before/after)
-python run.py --brief-file demo_brief.txt --auto-approve --no-llm
-
-# B) Same, with the real local model (after the OOM check above passes):
-python run.py --brief-file demo_brief.txt --auto-approve
-
-# C) Interactive gate — approve / re-plan strategy / rewrite posts / quit:
-python run.py --brief "We are launching a budget espresso machine for students. Two-week awareness, playful, don't over-promise."
-
-# D) Tests (mocked LLM, no model needed) + offline no-LLM proof:
-python -m unittest discover -s tests          # 27 tests, must print OK
+python run.py --brief-file demo_brief.txt --auto-approve   # full demo, non-interactive
+python run.py --brief "..."                                # interactive approval gate
+python -m unittest discover -s tests                       # 27 tests, mocked LLM
 ```
 
-Expected output of (A): `[publish] 12 posts live`, `[week1] imp=~32k`,
-`[week2] imp=~43k (delta +30%)`, then a 25-line agent trace and
-`LLM usage: {...}`. Artifacts: `logs/trace.jsonl` (every inter-agent message),
-`logs/last_run.json` (before/after numbers), `logs/prodigal.log`.
+Expected: `[publish] 12 posts live`, Week-1 report with numeric
+recommendations, Week-2 before/after, then the agent trace.
+Artifacts: `logs/trace.jsonl`, `logs/last_run.json`.
 
-## 3. Architecture
+## Architecture
 
-One model (`qwen2.5:3b`), 8 agent classes (`prodigal_social/agents.py`), one
-SQLite DB as shared state, one `messages` table + `logs/trace.jsonl` as the
-message bus, one `CampaignRunner` (`prodigal_social/orchestration.py`) as the
-only router. Agents never call each other — all traffic is `bus.send()`.
+`CampaignRunner` (`prodigal_social/orchestration.py`) routes everything.
+Agents never call each other — all handoffs are `bus.send()` into a SQLite
+`messages` table mirrored to `logs/trace.jsonl`. Compliance gets 3 attempts
+per post, then the post drops to a human queue (never loops). Nothing
+publishes before the CLI approval gate returns yes (fails closed on EOF).
+Analytics stats are pure-Python group-bys; the LLM only verbalises numbers.
+Full box-and-arrow diagram: `docs/architecture.png` (also in the write-up PDF).
 
-```
-[human brief.txt]
-       |
-       v
-[Orchestrator] --parse--> [Strategy] --plan--> [Orchestrator]
-       |                                            |
-       |--> [Writer] <---> [Creative]               |
-       |         |                                  |
-       |         v                                  |
-       |   [Compliance] --reject(<=3x)--> [Writer]  |
-       |         |  (4th failure -> human_queue,     |
-       |         |   NEVER loops)                   |
-       |    approve                                 |
-       v         v                                  v
- >>> HUMAN APPROVAL GATE (CLI y/n; NOTHING publishes before 'y') <<<
-       |
-       v
-[Scheduler] --publish()--> [MockPlatform: buzz/forum/pro]
-       |                          | deterministic simulator
-       |                          v
-       |                   [metrics + comments]
-       v                          v
-[Community] <--read comments--> [MockPlatform] --sensitive--> [human_queue]
-       |
-       v
-[Analytics] --pure-Python stats--> [Weekly Report]
-       |
-       +--(stretch)--> [Strategy.plan(recommendations)] --> Week 2 --> before/after
-```
+Modules: `llm.py` (localhost wrapper, JSON repair, fallbacks) ·
+`platform.py` (mock API + hidden rules) · `agents.py` (8 prompts/tools) ·
+`bus.py` (bus + trace) · `orchestration.py` (caps, memory, gate) · `run.py` (CLI).
 
-Module map: `llm.py` (localhost-only wrapper, JSON repair ×3, fallbacks,
-token ledger) · `bus.py` (bus + trace) · `platform.py` (mock API + hidden
-rules) · `agents.py` (8 prompts/tools) · `orchestration.py` (retry caps,
-memory, gate) · `run.py` (CLI entry).
+## Scope cuts
 
-## 4. What I cut (scope log — solo, ~4 days, 8 GB CPU-only)
+Single 3B over 3B+8B (8 GB RAM cannot hold 8B); hand-rolled router over
+LangGraph/CrewAI (defensible in interview); one `agents.py` over 8 files;
+plain-function API over FastAPI; text creative briefs over image gen (permitted);
+CLI over web UI; SQLite history over RAG (12 rows need no retrieval).
 
-1. **Two-model setup (3B router + 7–8B writer) → single `qwen2.5:3b`.**
-   An 8B needs ~5 GB; with 8 GB total RAM the machine OOM'd even on the 3B
-   until freed. One model + per-agent temperatures (0.0 router/compliance,
-   0.7 writer/creative) + code validators recovers the reliability gap.
-2. **Agent framework (LangGraph/CrewAI) → ~60 lines of hand-rolled routing.**
-   Own loop is fully explainable in Round 2; a framework would mean defending
-   library internals instead of my design.
-3. **`agents/` package with 8 files → one `agents.py` with 8 classes.**
-   Multi-agent-ness comes from separate prompts + tools + bus transitions,
-   not file count. Saved ~half a day of boilerplate.
-4. **FastAPI server → plain function API** (`publish_post/get_feed/get_metrics/
-   get_comments/add_reply`). No ports, no auth, runs offline; the brief allows it.
-5. **Real image generation → 1–2 sentence creative briefs.** Explicitly permitted.
-6. **Web UI → CLI + JSONL trace.** Video-friendly enough; ~half a day saved.
-7. **Embeddings/RAG/memory search → SQLite `campaigns` table + messages log.**
-   History is small; full-text search would be unused machinery.
+## Hidden rules — GROUND TRUTH (`prodigal_social/platform.py:62`)
 
-## 5. Hidden engagement rules — GROUND TRUTH (`prodigal_social/platform.py:62`)
-
-Planted in `_apply_hidden_rules`. Agents see only resulting numbers, never
-these formulas. Deterministic `sha256`-based ±10% noise (NOT `randint`), so
-re-runs are identical and Week 1 vs Week 2 is comparable.
+Agents see only resulting numbers, never these formulas. Noise is deterministic
+`sha256`-based ±10% (not `randint`), so re-runs are identical.
 
 | # | Rule | Formula |
 |---|---|---|
-| R1 | Prime time | 18–21h `×1.8` (pro `×1.4`); pro 08–10h `×1.6`; 12–13h `×1.3`; 00–05h `×0.4`; else `×1.0` |
-| R2 | Question boost | copy ending `?` → comments `×2.6` (forum `×3.2`) |
-| R3 | Hashtag curve | 0 tags `×0.8` · 1–2 `×1.3` · 3 `×1.0` · 4+ `×0.55` (reach) |
-| R4 | Length/slang | buzz >80w `×0.5`; forum 60–180w `×1.25` else `×0.85`; pro >120w `×0.6`; slang on pro `×0.7` |
-| R5 | Novelty decay | same format 2+ prior days, same channel → `0.7^streak` |
-| R6 | CTA tradeoff | `link` clicks `×1.8` but likes `×0.8`; `question` comments `×1.5` |
-| R7 | Overclaim backlash | `guaranteed/#1/miracle/risk-free/...` → shares `×0.6`, −5 followers, +45% negative-comment skew |
+| R1 | Prime time | 18–21h x1.8 (pro x1.4); pro 08–10h x1.6; 12–13h x1.3; 00–05h x0.4 |
+| R2 | Question boost | copy ending `?` → comments x2.6 (forum x3.2) |
+| R3 | Hashtag curve | 0 tags x0.8 · 1–2 x1.3 · 3 x1.0 · 4+ x0.55 |
+| R4 | Length/slang | buzz >80w x0.5; forum 60–180w x1.25 else x0.85; pro >120w x0.6; pro slang x0.7 |
+| R5 | Novelty decay | same format 2+ prior days, same channel → 0.7^streak |
+| R6 | CTA tradeoff | `link` clicks x1.8 but likes x0.8; `question` comments x1.5 |
+| R7 | Overclaim backlash | `guaranteed/#1/miracle/...` → shares x0.6, −5 followers, +45% negative skew |
 
-Channels: **buzz** (short video, base 2500 imp, hates long copy) ·
+Channels: **buzz** (short video, base 2500, hates long copy) ·
 **forum** (discussion, base 1200, rewards depth + questions) ·
 **pro** (professional, base 900, morning peak, hates slang).
 
-**Honest scorecard (fallback-mode run):** found R1 (+106% evening, acted on,
-W2 +30%), R2 (after adding Q/stmt variance to fallbacks), R6 noted but below
-rec threshold. Missed R3/R4/R7 — Compliance *rejects* the violating posts, so
-they never publish and Analytics has no variance to learn from (guardrail
-censors the evidence; fix = log rejected drafts as counterfactuals). Missed R5
-— Week-1 plan rotates formats so no streak forms, and `_stats` has no streak
-detector yet.
-
-## 6. Submission checklist
-
-- [ ] `pip install -r requirements.txt` + `ollama pull qwen2.5:3b`
-- [ ] `python -m unittest discover -s tests` → OK (25 tests, mocked)
-- [ ] `python run.py --brief-file demo_brief.txt --auto-approve` → 12 posts, W1→W2 lift
-- [ ] ZIP the repo **without** weights/venv/`__pycache__`/`.db` logs:
-  `git archive -o submission.zip HEAD` (repo has no binaries by construction)
-- [ ] Email ZIP to `surabhi@prodigalai.com`, subject
-  `Task 1 Submission — <Full Name> — <College/Org>`, plus README + write-up PDF + demo link
+Scorecard: Analytics rediscovers R1 reliably. R2 needs question variance in
+drafts; with the real 3B, drafts collapse to one format and zero questions, so
+Week 2 can regress via R5 decay — observed live (−22%), mechanism identified.
+R3/R4/R7 are structurally unobservable: Compliance rejects violating posts
+pre-publish, so the evidence never reaches the metrics table; rejected drafts
+are logged as counterfactuals (`post_dropped` bus messages).
